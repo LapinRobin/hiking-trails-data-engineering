@@ -4,7 +4,7 @@
 
 Project [DATA Engineering](https://www.riccardotommasini.com/courses/dataeng-insa-ot/) is provided by [INSA Lyon](https://www.insa-lyon.fr/).
 
-Students: **Bachir GEUDDOUDA, Zhong Qing SIA, Yikang SU**
+Students: **Bachir GUEDDOUDA, Zhong Qing SIA, Yikang SU**
 
 ### Abstract
 
