@@ -141,6 +141,40 @@ def _transform_to_geojson():
     print(f"GeoJSON data saved to {geojson_filename}")
     return geojson_filename
 
+def _insert_geojson_to_mongodb(**context):
+    import glob
+    import json
+    import os
+    import pymongo
+    
+    # Get the latest GeoJSON file
+    base_path = "/opt/airflow/dags/data"
+    geojson_files = glob.glob(f"{base_path}/geojson/*.geojson")
+    if not geojson_files:
+        raise FileNotFoundError("No GeoJSON files found to insert")
+    
+    latest_geojson = max(geojson_files, key=os.path.getctime)
+    
+    # Read the GeoJSON file
+    with open(latest_geojson, 'r') as f:
+        geojson_data = json.load(f)
+    
+    # Connect to MongoDB directly
+    client = pymongo.MongoClient("mongodb://airflow:airflow@mongo:27017/")
+    db = client['airflow']
+    collection = db['raw_memes']
+    
+    # Insert the GeoJSON data
+    collection.insert_one(geojson_data)
+    print(f"Inserted GeoJSON data from {latest_geojson} into MongoDB")
+    client.close()
+
+insert_geojson_to_mongodb = PythonOperator(
+    task_id='insert_geojson_to_mongodb',
+    python_callable=_insert_geojson_to_mongodb,
+    dag=walking_trail_dag,
+)
+
 # Create the tasks
 fetch_osm_raw = PythonOperator(
     task_id='fetch_osm_raw',
@@ -161,4 +195,4 @@ end = DummyOperator(
 )
 
 # Update the DAG structure
-check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> end
+check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_geojson_to_mongodb >> end
