@@ -1,0 +1,7 @@
+
+__pycache__/
+.DS_Store
+airflow/dags/data/*
+airflow/dags/logs/*
+airflow/logs/*
+test-tools/*
