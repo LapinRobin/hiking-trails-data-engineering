@@ -162,7 +162,7 @@ def _insert_geojson_to_mongodb(**context):
     # Connect to MongoDB directly
     client = pymongo.MongoClient("mongodb://airflow:airflow@mongo:27017/")
     db = client['airflow']
-    collection = db['raw_memes']
+    collection = db['geojson']
     
     # Insert the GeoJSON data
     collection.insert_one(geojson_data)
