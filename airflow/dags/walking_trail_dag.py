@@ -141,7 +141,7 @@ def _transform_to_geojson():
     print(f"GeoJSON data saved to {geojson_filename}")
     return geojson_filename
 
-def _insert_geojson_to_mongodb(**context):
+def _insert_and_flatten_geojson_to_mongodb(**context):
     import glob
     import json
     import os
@@ -162,16 +162,44 @@ def _insert_geojson_to_mongodb(**context):
     # Connect to MongoDB directly
     client = pymongo.MongoClient("mongodb://airflow:airflow@mongo:27017/")
     db = client['airflow']
-    collection = db['geojson']
+    # collection = db['geojson']
     
-    # Insert the GeoJSON data
-    collection.insert_one(geojson_data)
-    print(f"Inserted GeoJSON data from {latest_geojson} into MongoDB")
+    # # Insert the GeoJSON data
+    # collection.insert_one(geojson_data)
+    # print(f"Inserted GeoJSON data from {latest_geojson} into MongoDB")
+    # client.close()
+
+    geojson_collection = db['geojson']
+    flattened_collection = db['flattened_geojson']
+
+    # Clear collections before inserting
+    geojson_collection.delete_many({})
+    flattened_collection.delete_many({})
+
+    # Insert raw GeoJSON data
+    geojson_collection.insert_one(geojson_data)
+
+    # Flatten features using aggregation pipeline
+    pipeline = [
+        {"$unwind": "$features"},
+        {
+            "$project": {
+                "_id": "$features.id",
+                "coordinates": "$features.geometry.coordinates",
+                "properties": "$features.properties",
+            }
+        }
+    ]
+    flattened_docs = list(geojson_collection.aggregate(pipeline))
+    if flattened_docs:
+        flattened_collection.insert_many(flattened_docs)
+
+    print("Inserted and flattened GeoJSON data in MongoDB.")
     client.close()
 
-insert_geojson_to_mongodb = PythonOperator(
-    task_id='insert_geojson_to_mongodb',
-    python_callable=_insert_geojson_to_mongodb,
+insert_and_flatten_geojson_to_mongodb = PythonOperator(
+    task_id='insert_and_flatten_geojson_to_mongodb',
+    python_callable=_insert_and_flatten_geojson_to_mongodb,
     dag=walking_trail_dag,
 )
 
@@ -195,4 +223,4 @@ end = DummyOperator(
 )
 
 # Update the DAG structure
-check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_geojson_to_mongodb >> end
+check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_and_flatten_geojson_to_mongodb >> end
