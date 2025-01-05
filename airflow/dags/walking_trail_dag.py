@@ -69,6 +69,7 @@ def _fetch_osm_raw():
     lon_start = 4.829162
     lon_end = 4.893063
     step = 0.02
+    
 
     overpass_url = "https://overpass-api.de/api/interpreter"
     query = """
@@ -197,6 +198,104 @@ def _insert_and_flatten_geojson_to_mongodb(**context):
     print("Inserted and flattened GeoJSON data in MongoDB.")
     client.close()
 
+def _find_paths_between_points():
+    import pymongo
+    import math
+    import heapq
+    from pymongo import MongoClient
+
+    def haversine(coord1, coord2):
+        """Calculate the great-circle distance between two points."""
+        R = 6371  # Earth radius in km
+        lat1, lon1 = math.radians(coord1[1]), math.radians(coord1[0])
+        lat2, lon2 = math.radians(coord2[1]), math.radians(coord2[0])
+        dlat = lat2 - lat1
+        dlon = lon2 - lon1
+        a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
+        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+        return R * c
+
+    def build_graph(db):
+        """Build a graph representation from MongoDB data."""
+        graph = {}
+        docs = list(db.flattened_geojson.find({}))  # Fetch all at once to reduce round-trips
+        for doc in docs:
+            coordinates = doc['coordinates']
+            for i in range(len(coordinates) - 1):
+                start = tuple(coordinates[i])
+                end = tuple(coordinates[i + 1])
+                distance = haversine(start, end)
+                if start not in graph:
+                    graph[start] = []
+                if end not in graph:
+                    graph[end] = []
+                graph[start].append((end, distance))
+                graph[end].append((start, distance))
+        return graph
+
+    def a_star_search(graph, start, goal):
+        """Perform A* search to find the shortest path."""
+        open_set = []
+        heapq.heappush(open_set, (0, start))
+        came_from = {}
+        g_score = {node: float('inf') for node in graph}
+        g_score[start] = 0
+        f_score = {node: float('inf') for node in graph}
+        f_score[start] = haversine(start, goal)
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+            if current == goal:
+                path = []
+                while current in came_from:
+                    path.append(current)
+                    current = came_from[current]
+                path.append(start)
+                return path[::-1]
+
+            for neighbor, cost in graph.get(current, []):
+                tentative_g_score = g_score[current] + cost
+                if tentative_g_score < g_score[neighbor]:
+                    came_from[neighbor] = current
+                    g_score[neighbor] = tentative_g_score
+                    f_score[neighbor] = g_score[neighbor] + haversine(neighbor, goal)
+                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
+
+        return None
+
+    client = MongoClient("mongodb://airflow:airflow@mongo:27017/")
+    db = client['airflow']
+
+    graph = build_graph(db)
+
+    # Define start and goal
+    start = (4.8609411, 45.7434554)
+    goal = (4.8608326, 45.7605576)
+
+    # Find path
+    path = a_star_search(graph, start, goal)
+    if path:
+        print("Shortest path found:")
+        for coord in path:
+            print(coord)
+
+        # Insert the path into a new MongoDB collection
+        path_collection = db['computed_paths']
+        path_document = {
+            "start": start,
+            "goal": goal,
+            "path": path,
+            "path_length": len(path),  # Number of nodes in the path
+        }
+        path_collection.insert_one(path_document)
+        print(f"Path inserted into MongoDB collection 'computed_paths': {path_document}")
+    else:
+        print("No path found.")
+
+
+    client.close()
+
+
 insert_and_flatten_geojson_to_mongodb = PythonOperator(
     task_id='insert_and_flatten_geojson_to_mongodb',
     python_callable=_insert_and_flatten_geojson_to_mongodb,
@@ -216,6 +315,12 @@ transform_to_geojson = PythonOperator(
     dag=walking_trail_dag,
 )
 
+find_paths_between_points = PythonOperator(
+    task_id='find_paths_between_points',
+    python_callable=_find_paths_between_points,
+    dag=walking_trail_dag,
+)
+
 end = DummyOperator(
     task_id='end',
     dag=walking_trail_dag,
@@ -223,4 +328,4 @@ end = DummyOperator(
 )
 
 # Update the DAG structure
-check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_and_flatten_geojson_to_mongodb >> end
+check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_and_flatten_geojson_to_mongodb >> find_paths_between_points >> end
