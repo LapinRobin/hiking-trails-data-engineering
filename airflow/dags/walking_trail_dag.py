@@ -69,7 +69,6 @@ def _fetch_osm_raw():
     lon_start = 4.829162
     lon_end = 4.893063
     step = 0.02
-    
 
     overpass_url = "https://overpass-api.de/api/interpreter"
     query = """
@@ -294,7 +293,6 @@ def _find_paths_between_points():
 
 
     client.close()
-
 
 insert_and_flatten_geojson_to_mongodb = PythonOperator(
     task_id='insert_and_flatten_geojson_to_mongodb',

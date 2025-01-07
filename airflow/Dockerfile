@@ -16,3 +16,4 @@ USER airflow
 
 # Install pymongo directly using pip
 RUN pip install --no-cache-dir pymongo==4.6.1 
+RUN pip install openmeteo-requests
