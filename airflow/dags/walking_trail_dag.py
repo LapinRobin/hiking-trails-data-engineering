@@ -65,14 +65,15 @@ def _fetch_osm_raw():
     os.makedirs(f"{base_path}/geojson/", exist_ok=True)
     
     """ lat_start = 45.740545
-    lat_end = 45.766177
+    lat_end = 45.966177
     lon_start = 4.829162
     lon_end = 4.893063 """
 
+
     lat_start = 45.740545
-    lat_end = 46.266177
+    lat_end = 45.766177
     lon_start = 4.829162
-    lon_end = 4.993063
+    lon_end = 4.893063
 
     step = 0.02
 
@@ -126,11 +127,7 @@ def _transform_to_geojson():
         osm_xml = f.read()
     
     # Convert to GeoJSON
-    geojson = convert_osm_to_geojson(
-        osm_xml,
-        enhanced_properties=True,
-        verbose=True
-    )
+    geojson = convert_osm_to_geojson(osm_xml)
     
     # Create output filename based on input filename
     base_name = os.path.splitext(os.path.basename(latest_xml))[0]
@@ -146,11 +143,13 @@ def _transform_to_geojson():
     print(f"GeoJSON data saved to {geojson_filename}")
     return geojson_filename
 
-def _insert_and_flatten_geojson_to_mongodb(**context):
+def _insert_geojson_to_mongodb(**context):
+    """Insert GeoJSON features as separate documents with flattened coordinates."""
     import glob
     import json
     import os
     import pymongo
+    from datetime import datetime
     
     # Get the latest GeoJSON file
     base_path = "/opt/airflow/dags/data"
@@ -164,144 +163,63 @@ def _insert_and_flatten_geojson_to_mongodb(**context):
     with open(latest_geojson, 'r') as f:
         geojson_data = json.load(f)
     
-    # Connect to MongoDB directly
+    # Connect to MongoDB
     client = pymongo.MongoClient("mongodb://airflow:airflow@mongo:27017/")
     db = client['airflow']
-    # collection = db['geojson']
+    collection = db['walking_trails']
     
-    # # Insert the GeoJSON data
-    # collection.insert_one(geojson_data)
-    # print(f"Inserted GeoJSON data from {latest_geojson} into MongoDB")
-    # client.close()
-
-    geojson_collection = db['geojson']
-    flattened_collection = db['flattened_geojson']
-
-    # Clear collections before inserting
-    geojson_collection.delete_many({})
-    flattened_collection.delete_many({})
-
-    # Insert raw GeoJSON data
-    geojson_collection.insert_one(geojson_data)
-
-    # Flatten features using aggregation pipeline
-    pipeline = [
-        {"$unwind": "$features"},
-        {
-            "$project": {
-                "_id": "$features.id",
-                "coordinates": "$features.geometry.coordinates",
-                "properties": "$features.properties",
+    try:
+        # Clear existing data
+        collection.delete_many({})
+        
+        # Process each feature
+        processed_features = []
+        for feature in geojson_data['features']:
+            # Extract basic information
+            trail = {
+                'relation_id': feature['id'].split('/')[-1],  # Extract numeric ID from "relation/123456"
+                'properties': feature['properties'],
+                'type': feature['geometry']['type'],
+                'updated_at': datetime.utcnow()
             }
-        }
-    ]
-    flattened_docs = list(geojson_collection.aggregate(pipeline))
-    if flattened_docs:
-        flattened_collection.insert_many(flattened_docs)
+            
+            # Process coordinates based on geometry type
+            if feature['geometry']['type'] == 'MultiLineString':
+                # Flatten MultiLineString coordinates
+                trail['segments'] = [
+                    [
+                        {'lon': coord[0], 'lat': coord[1]} 
+                        for coord in segment
+                    ]
+                    for segment in feature['geometry']['coordinates']
+                ]
+            elif feature['geometry']['type'] == 'LineString':
+                # Flatten LineString coordinates
+                trail['segments'] = [
+                    [
+                        {'lon': coord[0], 'lat': coord[1]}
+                        for coord in feature['geometry']['coordinates']
+                    ]
+                ]
+            
+            processed_features.append(trail)
+        
+        # Insert all processed features
+        if processed_features:
+            collection.insert_many(processed_features)
+            print(f"Inserted {len(processed_features)} walking trails into MongoDB")
+        else:
+            print("No features found to insert")
+            
+    finally:
+        client.close()
+    
+    return len(processed_features)
 
-    print("Inserted and flattened GeoJSON data in MongoDB.")
-    client.close()
-
-def _find_paths_between_points():
-    import pymongo
-    import math
-    import heapq
-    from pymongo import MongoClient
-
-    def haversine(coord1, coord2):
-        """Calculate the great-circle distance between two points."""
-        R = 6371  # Earth radius in km
-        lat1, lon1 = math.radians(coord1[1]), math.radians(coord1[0])
-        lat2, lon2 = math.radians(coord2[1]), math.radians(coord2[0])
-        dlat = lat2 - lat1
-        dlon = lon2 - lon1
-        a = math.sin(dlat / 2)**2 + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2)**2
-        c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
-        return R * c
-
-    def build_graph(db):
-        """Build a graph representation from MongoDB data."""
-        graph = {}
-        docs = list(db.flattened_geojson.find({}))  # Fetch all at once to reduce round-trips
-        for doc in docs:
-            coordinates = doc['coordinates']
-            for i in range(len(coordinates) - 1):
-                start = tuple(coordinates[i])
-                end = tuple(coordinates[i + 1])
-                distance = haversine(start, end)
-                if start not in graph:
-                    graph[start] = []
-                if end not in graph:
-                    graph[end] = []
-                graph[start].append((end, distance))
-                graph[end].append((start, distance))
-        return graph
-
-    def a_star_search(graph, start, goal):
-        """Perform A* search to find the shortest path."""
-        open_set = []
-        heapq.heappush(open_set, (0, start))
-        came_from = {}
-        g_score = {node: float('inf') for node in graph}
-        g_score[start] = 0
-        f_score = {node: float('inf') for node in graph}
-        f_score[start] = haversine(start, goal)
-
-        while open_set:
-            _, current = heapq.heappop(open_set)
-            if current == goal:
-                path = []
-                while current in came_from:
-                    path.append(current)
-                    current = came_from[current]
-                path.append(start)
-                return path[::-1]
-
-            for neighbor, cost in graph.get(current, []):
-                tentative_g_score = g_score[current] + cost
-                if tentative_g_score < g_score[neighbor]:
-                    came_from[neighbor] = current
-                    g_score[neighbor] = tentative_g_score
-                    f_score[neighbor] = g_score[neighbor] + haversine(neighbor, goal)
-                    heapq.heappush(open_set, (f_score[neighbor], neighbor))
-
-        return None
-
-    client = MongoClient("mongodb://airflow:airflow@mongo:27017/")
-    db = client['airflow']
-
-    graph = build_graph(db)
-
-    # Define start and goal
-    start = (4.8609411, 45.7434554)
-    goal = (4.8608326, 45.7605576)
-
-    # Find path
-    path = a_star_search(graph, start, goal)
-    if path:
-        print("Shortest path found:")
-        for coord in path:
-            print(coord)
-
-        # Insert the path into a new MongoDB collection
-        path_collection = db['computed_paths']
-        path_document = {
-            "start": start,
-            "goal": goal,
-            "path": path,
-            "path_length": len(path),  # Number of nodes in the path
-        }
-        path_collection.insert_one(path_document)
-        print(f"Path inserted into MongoDB collection 'computed_paths': {path_document}")
-    else:
-        print("No path found.")
-
-
-    client.close()
-
-insert_and_flatten_geojson_to_mongodb = PythonOperator(
-    task_id='insert_and_flatten_geojson_to_mongodb',
-    python_callable=_insert_and_flatten_geojson_to_mongodb,
+# Create the MongoDB insertion task
+insert_geojson_to_mongodb = PythonOperator(
+    task_id='insert_geojson_to_mongodb',
+    python_callable=_insert_geojson_to_mongodb,
     dag=walking_trail_dag,
 )
 
@@ -318,11 +236,7 @@ transform_to_geojson = PythonOperator(
     dag=walking_trail_dag,
 )
 
-find_paths_between_points = PythonOperator(
-    task_id='find_paths_between_points',
-    python_callable=_find_paths_between_points,
-    dag=walking_trail_dag,
-)
+
 
 end = DummyOperator(
     task_id='end',
@@ -331,4 +245,4 @@ end = DummyOperator(
 )
 
 # Update the DAG structure
-check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> end
+check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_geojson_to_mongodb >> end
