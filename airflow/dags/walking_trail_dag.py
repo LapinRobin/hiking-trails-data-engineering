@@ -64,18 +64,23 @@ def _fetch_osm_raw():
     os.makedirs(f"{base_path}/osm_xml/", exist_ok=True)
     os.makedirs(f"{base_path}/geojson/", exist_ok=True)
     
-    lat_start = 45.740545
+    """ lat_start = 45.740545
     lat_end = 45.766177
     lon_start = 4.829162
-    lon_end = 4.893063
+    lon_end = 4.893063 """
+
+    lat_start = 45.740545
+    lat_end = 46.266177
+    lon_start = 4.829162
+    lon_end = 4.993063
+
     step = 0.02
 
     overpass_url = "https://overpass-api.de/api/interpreter"
     query = """
     [out:xml][timeout:25];
     (
-      way
-        ["highway"~"^(path|track|footway|steps|bridleway)$"]
+      relation["type"~"route|superroute"]["route"~"foot|walking|hiking"]
         ({lat_min},{lon_min},{lat_max},{lon_max});
     );
     out body;
@@ -326,4 +331,4 @@ end = DummyOperator(
 )
 
 # Update the DAG structure
-check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_and_flatten_geojson_to_mongodb >> find_paths_between_points >> end
+check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> end
