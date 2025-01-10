@@ -4,16 +4,18 @@ import urllib.request as request
 import requests
 import json
 import subprocess
-import openmeteo_requests
+
 from airflow import DAG
 from airflow.operators.bash_operator import BashOperator
 from airflow.operators.python_operator import PythonOperator, BranchPythonOperator
 from airflow.operators.dummy_operator import DummyOperator
-from openmeteo_sdk.Variable import Variable
+
 from pymongo import MongoClient
 import os
 import zipfile
 import shutil
+import rasterio
+from pathlib import Path
 
 default_args_dict = {
     'start_date': airflow.utils.dates.days_ago(0),
@@ -126,6 +128,133 @@ def move_tif_files(**context):
     
     return moved_files
 
+def find_appropriate_tiff(lat, lon, tiff_directory):
+    """
+    Find the appropriate TIFF file for given coordinates
+    
+    Args:
+        lat (float): Latitude
+        lon (float): Longitude
+        tiff_directory (str): Directory containing SRTM TIFF files
+    
+    Returns:
+        str: Path to the appropriate TIFF file, or None if not found
+    """
+    for tiff_file in Path(tiff_directory).glob("srtm_*.tif"):
+        try:
+            with rasterio.open(tiff_file) as dataset:
+                bounds = dataset.bounds
+                if (bounds.left <= lon <= bounds.right and 
+                    bounds.bottom <= lat <= bounds.top):
+                    return str(tiff_file)
+        except rasterio.errors.RasterioError:
+            continue
+    return None
+
+def get_elevation(lat, lon, tiff_directory):
+    """
+    Get elevation for a given latitude and longitude from SRTM GeoTIFF files
+    
+    Args:
+        lat (float): Latitude
+        lon (float): Longitude
+        tiff_directory (str): Directory containing SRTM TIFF files
+    
+    Returns:
+        float: Elevation value at the given coordinate
+    """
+    appropriate_tiff = find_appropriate_tiff(lat, lon, tiff_directory)
+    
+    if not appropriate_tiff:
+        print(f"No suitable TIFF file found for coordinates ({lat}, {lon})")
+        return None
+        
+    try:
+        with rasterio.open(appropriate_tiff) as dataset:
+            # Get the row, col index for the given coordinate
+            row, col = dataset.index(lon, lat)
+            
+            # Read the elevation value at that pixel
+            elevation = dataset.read(1)[row, col]
+            
+            return float(elevation)
+            
+    except rasterio.errors.RasterioError as e:
+        print(f"Error reading GeoTIFF file: {e}")
+        return None
+
+def process_elevations(**context):
+    """Process elevations for all coordinates in MongoDB documents."""
+    # MongoDB setup
+    client = MongoClient("mongodb://airflow:airflow@mongo:27017/")
+    db = client['airflow']
+    collection = db['walking_trails']
+    
+    # Path to TIFF files
+    tiff_directory = "/opt/airflow/dags/data/tif"
+    
+    try:
+        # Fetch all documents from MongoDB
+        documents = list(collection.find({}))
+        print(f"Found {len(documents)} documents to process")
+        
+        for doc in documents:
+            modified = False
+            updates = []  # Track all updates for this document
+            
+            # Process each segment in segments array
+            if 'segments' in doc:
+                for i, segment in enumerate(doc['segments']):
+                    for j, coord in enumerate(segment):
+                        # Skip if elevation is already present
+                        if 'elevation' in coord:
+                            continue
+                            
+                        lat = coord['lat']
+                        lon = coord['lon']
+                        
+                        # Get elevation for the coordinate
+                        elevation = get_elevation(lat, lon, tiff_directory)
+                        
+                        if elevation is not None:
+                            # Add update to our list
+                            updates.append((i, j, float(elevation)))
+                            modified = True
+                            print(f"Found elevation {elevation}m for coord ({lat}, {lon})")
+            
+            if modified and updates:
+                # Prepare bulk update
+                update_dict = {
+                    f"segments.{i}.{j}.elevation": elevation
+                    for i, j, elevation in updates
+                }
+                
+                # Add timestamp
+                update_dict["updated_at"] = datetime.datetime.utcnow()
+                
+                # Perform update
+                result = collection.update_one(
+                    {"_id": doc["_id"]},
+                    {"$set": update_dict}
+                )
+                
+                print(f"Document {doc['_id']}: Updated {len(updates)} coordinates. "
+                      f"MongoDB reports {result.modified_count} documents modified")
+                
+                # Verify the update
+                updated_doc = collection.find_one({"_id": doc["_id"]})
+                if updated_doc:
+                    print(f"Verification - Document now has updated_at: {updated_doc.get('updated_at')}")
+                    # Check first updated coordinate
+                    if updates:
+                        i, j, elevation = updates[0]
+                        actual_elevation = (updated_doc.get('segments', [])[i][j]
+                                         .get('elevation', None) if updated_doc.get('segments') else None)
+                        print(f"Verification - First coordinate elevation: {actual_elevation}")
+    
+    finally:
+        client.close()
+
 # Task 1: Download SRTM files
 download_task = PythonOperator(
     task_id='download_srtm_files',
@@ -147,6 +276,13 @@ move_files_task = PythonOperator(
     python_callable=move_tif_files
 )
 
+# Task 4: Process elevations
+process_elevations_task = PythonOperator(
+    task_id='process_elevations',
+    dag=elevation,
+    python_callable=process_elevations
+)
+
 end = DummyOperator(
     task_id='end',
     dag=elevation,
@@ -154,4 +290,4 @@ end = DummyOperator(
 )
 
 # Set task dependencies
-download_task >> unzip_task >> move_files_task >> end
+download_task >> unzip_task >> move_files_task >> process_elevations_task >> end
