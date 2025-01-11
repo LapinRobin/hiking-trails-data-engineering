@@ -256,28 +256,28 @@ def process_elevations(**context):
         client.close()
 
 # Task 1: Download SRTM files
-download_task = PythonOperator(
+download_zip = PythonOperator(
     task_id='download_srtm_files',
     dag=elevation,
     python_callable=download_srtm_files
 )
 
 # Task 2: Unzip files
-unzip_task = PythonOperator(
+unzip_srtm_files = PythonOperator(
     task_id='unzip_srtm_files',
     dag=elevation,
     python_callable=unzip_srtm_files
 )
 
 # Task 3: Move TIF files
-move_files_task = PythonOperator(
+move_tif_files = PythonOperator(
     task_id='move_tif_files',
     dag=elevation,
     python_callable=move_tif_files
 )
 
 # Task 4: Process elevations
-process_elevations_task = PythonOperator(
+process_elevations = PythonOperator(
     task_id='process_elevations',
     dag=elevation,
     python_callable=process_elevations
@@ -290,4 +290,4 @@ end = DummyOperator(
 )
 
 # Set task dependencies
-download_task >> unzip_task >> move_files_task >> process_elevations_task >> end
+download_zip >> unzip_srtm_files >> move_tif_files >> process_elevations >> end
