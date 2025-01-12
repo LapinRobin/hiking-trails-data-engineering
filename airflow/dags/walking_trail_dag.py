@@ -476,6 +476,9 @@ process_elevations_task = PythonOperator(
     dag=walking_trail_dag,
 )
 
-# Update the DAG structure
-check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_geojson_to_mongodb >> [download_srtm, end]
-download_srtm >> unzip_srtm >> move_tif >> process_elevations_task >> end
+# OSM data pipeline
+check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_geojson_to_mongodb
+
+# SRTM data pipeline
+[download_srtm >> unzip_srtm >> move_tif, insert_geojson_to_mongodb] >> process_elevations_task >> end
+    
