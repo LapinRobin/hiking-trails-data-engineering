@@ -476,9 +476,263 @@ process_elevations_task = PythonOperator(
     dag=walking_trail_dag,
 )
 
-# OSM data pipeline
-check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_geojson_to_mongodb
+def calculate_elevation_profile(**context):
+    """Calculate total ascending and descending elevations for all trails in MongoDB documents."""
+    # MongoDB setup
+    client = MongoClient("mongodb://airflow:airflow@mongo:27017/")
+    db = client['airflow']
+    collection = db['walking_trails']
+    
+    try:
+        # Fetch all documents from MongoDB
+        documents = list(collection.find({}))
+        print(f"Found {len(documents)} documents to process")
+        
+        for doc in documents:
+            modified = False
+            total_ascending = 0.0
+            total_descending = 0.0
+            
+            # Process each segment in segments array
+            if 'segments' in doc:
+                for segment in doc['segments']:
+                    # Calculate elevation changes between consecutive points
+                    for j in range(len(segment) - 1):
+                        point1 = segment[j]
+                        point2 = segment[j + 1]
+                        
+                        # Skip if either point doesn't have elevation data
+                        if 'elevation' not in point1 or 'elevation' not in point2:
+                            continue
+                        
+                        # Calculate elevation difference
+                        elevation_diff = float(point2['elevation']) - float(point1['elevation'])
+                        
+                        # Accumulate ascending and descending values
+                        if elevation_diff > 0:
+                            total_ascending += elevation_diff
+                        else:
+                            total_descending += abs(elevation_diff)
+                        
+                        modified = True
+            
+            if modified:
+                # Update document with only total ascending and descending values
+                result = collection.update_one(
+                    {"_id": doc["_id"]},
+                    {
+                        "$set": {
+                            "elevation_profile.total_ascending": float(total_ascending),
+                            "elevation_profile.total_descending": float(total_descending),
+                            "updated_at": datetime.datetime.utcnow()
+                        }
+                    }
+                )
+                print(f"Updated document {doc['_id']}: "
+                      f"Total ascending: {total_ascending:.1f}m, "
+                      f"Total descending: {total_descending:.1f}m. "
+                      f"MongoDB reports {result.modified_count} documents modified")
+                
+    finally:
+        client.close()
 
-# SRTM data pipeline
-[download_srtm >> unzip_srtm >> move_tif, insert_geojson_to_mongodb] >> process_elevations_task >> end
+
+
+def calculate_distance(coord1, coord2):
+    """
+    Calculate distance between two coordinates using the Equirectangular approximation.
+    This is suitable for small distances and offers good performance.
+    Distance unit is in kilometers.
+    
+    Reference: https://www.movable-type.co.uk/scripts/latlong.html
+    """
+    import math
+    
+    # Earth's mean radius in kilometers
+    R = 6371.0
+    
+    # Convert to radians
+    lat1 = math.radians(coord1['lat'])
+    lon1 = math.radians(coord1['lon'])
+    lat2 = math.radians(coord2['lat'])
+    lon2 = math.radians(coord2['lon'])
+    
+    # Differences in coordinates
+    delta_lon = lon2 - lon1
+    delta_lat = lat2 - lat1
+    
+    # Equirectangular approximation
+    # x = Δλ * cos(φm)    where φm is average latitude
+    # y = Δφ
+    # d = R * √(x² + y²)
+    x = delta_lon * math.cos((lat1 + lat2) / 2)
+    y = delta_lat
+    
+    distance = R * math.sqrt(x*x + y*y)
+    return distance
+
+def process_distances(**context):
+    """Process distances for all segments in MongoDB documents."""
+    # MongoDB setup
+    client = MongoClient("mongodb://airflow:airflow@mongo:27017/")
+    db = client['airflow']
+    collection = db['walking_trails']
+    
+    try:
+        # Fetch all documents from MongoDB
+        documents = list(collection.find({}))
+        print(f"Found {len(documents)} documents to process")
+        
+        for doc in documents:
+            modified = False
+            segment_distances = []
+            total_distance = 0
+            
+            # Process each segment in segments array
+            if 'segments' in doc:
+                for segment in doc['segments']:
+                    segment_distance = 0
+                    
+                    # Calculate distance between consecutive points in the segment
+                    for j in range(len(segment) - 1):
+                        coord1 = segment[j]
+                        coord2 = segment[j + 1]
+                        distance = calculate_distance(coord1, coord2)
+                        segment_distance += distance
+                    
+                    segment_distances.append(segment_distance)
+                    total_distance += segment_distance
+                    modified = True
+            
+            if modified:
+                # Update document with segment distances and total distance
+                result = collection.update_one(
+                    {"_id": doc["_id"]},
+                    {
+                        "$set": {
+                            "total_distance": total_distance,
+                            "segment_distances": segment_distances,
+                            "updated_at": datetime.datetime.utcnow()
+                        }
+                    }
+                )
+                print(f"Updated document {doc['_id']}: {result.modified_count} modified")
+                
+    finally:
+        client.close()
+
+def process_trail_difficulties(**context):
+    """Process and update difficulty levels for all trails in MongoDB."""
+    # MongoDB setup
+    client = MongoClient("mongodb://airflow:airflow@mongo:27017/")
+    db = client['airflow']
+    collection = db['walking_trails']
+    
+    try:
+        # Fetch all documents from MongoDB
+        documents = list(collection.find({}))
+        print(f"Found {len(documents)} documents to process")
+        
+        for doc in documents:
+            # Skip if required fields are missing
+            if 'total_distance' not in doc or 'elevation_profile' not in doc:
+                print(f"Skipping document {doc['_id']}: Missing required fields")
+                continue
+            
+            # Get total distance (in km) and elevation gain
+            length_km = float(doc['total_distance'])
+            elevation_gain_m = float(doc['elevation_profile']['total_ascending'])
+            
+            # Calculate difficulty
+            difficulty_level = calculate_trail_difficulty(length_km, elevation_gain_m)
+            
+            # Update document with difficulty level
+            result = collection.update_one(
+                {"_id": doc["_id"]},
+                {
+                    "$set": {
+                        "difficulty": {
+                            "level": difficulty_level,
+                            "metrics": {
+                                "length_km": length_km,
+                                "elevation_gain_m": elevation_gain_m
+                            }
+                        },
+                        "updated_at": datetime.datetime.utcnow()
+                    }
+                }
+            )
+            print(f"Updated document {doc['_id']}: "
+                  f"Length: {length_km:.1f}km, "
+                  f"Elevation gain: {elevation_gain_m:.1f}m, "
+                  f"Difficulty: {difficulty_level}. "
+                  f"MongoDB reports {result.modified_count} documents modified")
+                
+    finally:
+        client.close()
+
+def calculate_trail_difficulty(length_km, elevation_gain_m):
+    """
+    Calculate trail difficulty based on length and elevation gain.
+    
+    Args:
+        length_km (float): Trail length in kilometers
+        elevation_gain_m (float): Total elevation gain in meters
+    
+    Returns:
+        str: Difficulty level ('Easy', 'Moderate', or 'Difficult')
+    """
+    # Length score
+    if length_km <= 5:
+        length_score = 1
+    elif 5 < length_km <= 15:
+        length_score = 2
+    else:
+        length_score = 3
+
+    # Elevation score
+    if elevation_gain_m <= 250:
+        elevation_score = 1
+    elif 250 < elevation_gain_m <= 750:
+        elevation_score = 2
+    else:
+        elevation_score = 3
+
+    # Difficulty score
+    difficulty_score = length_score + elevation_score
+
+    # Determine difficulty level
+    if difficulty_score <= 2:
+        return "Easy"
+    elif 3 <= difficulty_score <= 4:
+        return "Moderate"
+    else:
+        return "Difficult"
+    
+# Create distance calculation task
+process_distances_task = PythonOperator(
+    task_id='process_distances',
+    python_callable=process_distances,
+    dag=walking_trail_dag,
+)
+
+# Create elevation profile calculation task
+calculate_elevation_profile_task = PythonOperator(
+    task_id='calculate_elevation_profile',
+    python_callable=calculate_elevation_profile,
+    dag=walking_trail_dag,
+)
+
+# Create difficulty calculation task
+process_difficulties_task = PythonOperator(
+    task_id='process_trail_difficulties',
+    python_callable=process_trail_difficulties,
+    dag=walking_trail_dag,
+)
+
+# OSM data pipeline
+check_overpass_availability >> fetch_osm_raw >> transform_to_geojson >> insert_geojson_to_mongodb >> process_distances_task >> process_difficulties_task >> end
+
+# SRTM data pipeline and distance calculation
+[download_srtm >> unzip_srtm >> move_tif, insert_geojson_to_mongodb] >> process_elevations_task >> calculate_elevation_profile_task >> process_difficulties_task >> end
     
