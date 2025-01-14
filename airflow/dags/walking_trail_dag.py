@@ -66,6 +66,7 @@ def _fetch_osm_raw():
     
     # Use a more explicit path
     base_path = "/opt/airflow/dags/data"
+    offline_path = "/opt/airflow/dags/offline_data" 
     os.makedirs(f"{base_path}/osm_xml/", exist_ok=True)
     os.makedirs(f"{base_path}/geojson/", exist_ok=True)
     
@@ -98,17 +99,27 @@ def _fetch_osm_raw():
         lat_max=lat_end,
         lon_max=lon_end
     )
+
+    try:
+        # Attempt to fetch from Overpass API
+        response = requests.post(overpass_url, data={"data": query}, timeout=10)
+        if response.status_code == 200:
+            osm_filename = f"{base_path}/osm_xml/osm_data_{lat_start}_{lon_start}_{lat_end}_{lon_end}.xml"
+            with open(osm_filename, "w", encoding='utf-8') as f:
+                f.write(response.text)
+            print(f"Raw OSM data saved to {osm_filename}")
+            return osm_filename
+        else:
+            print(f"Overpass API returned an error: {response.status_code}")
+    except (requests.ConnectionError, requests.Timeout):
+        print("Internet not available, reverting to offline dataset.")
     
-    response = requests.post(overpass_url, data={"data": query})
-    if response.status_code == 200:
-        # Save raw OSM XML data
-        osm_filename = f"{base_path}/osm_xml/osm_data_{lat_start}_{lon_start}_{lat_end}_{lon_end}.xml"
-        with open(osm_filename, "w", encoding='utf-8') as f:
-            f.write(response.text)
-        print(f"Raw OSM data saved to {osm_filename}")
-        return osm_filename
+    # Fallback to offline dataset
+    if os.path.exists(offline_path):
+        print(f"Using offline dataset from {offline_path}")
+        return f"{offline_path}/osm_data_45.740545_4.829162_45.766177_4.893063.xml"
     else:
-        print(f"Error {response.status_code}: {response.text}")
+        print(f"Offline dataset not found at {offline_path}")
         return None
 
 def _transform_to_geojson():
@@ -119,11 +130,13 @@ def _transform_to_geojson():
     base_path = "/opt/airflow/dags/data"
     # Create the directory if it doesn't exist
     os.makedirs(f"{base_path}/geojson/", exist_ok=True)
+
+    offline_path = "/opt/airflow/dags/offline_data" 
     
-    # Find the most recent XML file
-    xml_files = glob.glob(f"{base_path}/osm_xml/*.xml")
+    # Look for OSM XML files in both default and offline locations
+    xml_files = glob.glob(f"{base_path}/osm_xml/*.xml") + glob.glob(f"{offline_path}/*.xml")
     if not xml_files:
-        raise FileNotFoundError("No OSM XML files found to convert")
+        raise FileNotFoundError("No OSM XML files found in default or offline locations to convert")
     
     latest_xml = max(xml_files, key=os.path.getctime)
     
@@ -158,10 +171,13 @@ def _insert_geojson_to_mongodb(**context):
     
     # Get the latest GeoJSON file
     base_path = "/opt/airflow/dags/data"
-    geojson_files = glob.glob(f"{base_path}/geojson/*.geojson")
+    offline_path = "/opt/airflow/dags/offline_data"
+
+    # Search for GeoJSON files in both default and offline locations
+    geojson_files = glob.glob(f"{base_path}/geojson/*.geojson") + glob.glob(f"{offline_path}/*.geojson")
     if not geojson_files:
-        raise FileNotFoundError("No GeoJSON files found to insert")
-    
+        raise FileNotFoundError("No GeoJSON files found in default or offline locations to insert")
+
     latest_geojson = max(geojson_files, key=os.path.getctime)
     
     # Read the GeoJSON file
@@ -255,6 +271,7 @@ def download_srtm_files():
     import pymongo
     # Create necessary directory
     base_path = "/opt/airflow/dags/data"
+    offline_path = "/opt/airflow/dags/offline_data"
     zip_dir = os.path.join(base_path, "zip")
     os.makedirs(zip_dir, exist_ok=True)
     
