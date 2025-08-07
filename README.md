@@ -10,6 +10,7 @@ Students: **Bachir GUEDDOUDA, Zhong Qing SIA, Yikang SU**
 
 This project focuses on analyzing and enriching hiking trail data in the Lyon area. It implements a data pipeline using Apache Airflow to collect, process, and analyze walking trail information from OpenStreetMap (OSM). The pipeline enriches the trail data with elevation profiles, distance calculations, and difficulty assessments to provide comprehensive information for hikers.
 
+![Trail Poster Portrait pdf_page-0001](https://github.com/user-attachments/assets/f792c39e-1a1c-4809-b9a4-aad7120a2a3d)
 ## Datasets Description 
 
 The project utilizes the following data sources:
